@@ -588,124 +588,116 @@ static void rdp_load_block(uint32_t w1, uint32_t w2)
 
 static void rdp_load_tile(uint32_t w1, uint32_t w2)
 {
-	const INT32 tilenum = (w2 >> 24) & 0x7;
+	int i, j;
+	uint16_t sl, sh, tl, th;
+	int width, height;
+	int tilenum = (w2 >> 24) & 0x7;
+  int line;
 
-	rdpTiles[tilenum].sl = ((w1 >> 12) & 0xfff);
-	rdpTiles[tilenum].tl = ((w1 >> 0) & 0xfff);
-	rdpTiles[tilenum].sh = ((w2 >> 12) & 0xfff);
-	rdpTiles[tilenum].th = ((w2 >> 0) & 0xfff);
+  rdpChanged |= RDP_BITS_TMEM;
+  
+	sl	= ((w1 >> 12) & 0xfff) / 4;
+	tl	= ((w1 >>  0) & 0xfff) / 4;
+	sh	= ((w2 >> 12) & 0xfff) / 4;
+	th	= ((w2 >>  0) & 0xfff) / 4;
 
-	const INT32 sl = rdpTiles[tilenum].sl >> 2;
-	const INT32 tl = rdpTiles[tilenum].tl >> 2;
-	const INT32 sh = rdpTiles[tilenum].sh >> 2;
-	const INT32 th = rdpTiles[tilenum].th >> 2;
+	width = (sh - sl) + 1;
+	height = (th - tl) + 1;
 
-	const INT32 width = (sh - sl) + 1;
-	const INT32 height = (th - tl) + 1;
-	/*
-	INT32 topad;
-	if (m_misc_state.m_ti_size < 3)
+//   printf("Load tile to %x line %x height %d\n",
+//          rdpTiles[tilenum].tmem,
+//          rdpTiles[tilenum].line,
+//          height);
+
+  rdpTiles[tilenum].size = rdpTiSize; // CHECK THIS 
+  line = rdpTiles[tilenum].line;
+	switch (rdpTiles[tilenum].size /*rdpTiSize*/)
 	{
-	topad = (width * m_misc_state.m_ti_size) & 0x7;
-	}
-	else
-	{
-	topad = (width << 2) & 0x7;
-	}
-	topad = 0; // ????
-	*/
-
-	switch (rdpTiSize)
-	{
-	case RDP_PIXEL_SIZE_8BIT:
-	{
-		const UINT32 src = rdpTiAddress;
-		const INT32 tb = rdpTiles[tilenum].tmem << 3;
-		UINT8* tc = (uint8_t*)rdpTmem;
-
-		for (INT32 j = 0; j < height; j++)
+		case RDP_PIXEL_SIZE_8BIT:
 		{
-			const INT32 tline = tb + ((rdpTiles[tilenum].line << 3) * j);
-			const INT32 s = ((j + tl) * rdpTiWidth) + sl;
-			const INT32 xorval8 = ((j & 1) ? BYTE_XOR_DWORD_SWAP : BYTE_ADDR_XOR);
+			uint8_t *src = (uint8_t*)&rdram[0];
+			uint8_t *tc = (uint8_t*)rdpTmem;
+			int tb = rdpTiles[tilenum].tmem;
 
-			for (INT32 i = 0; i < width; i++)
+      MarkTmemArea(tb, tb + height*line, rdpTiAddress + tl * rdpTiWidth + sl,
+                   rdpTiWidth, rdpTiFormat, rdpTiSize);
+
+			if (tb + (line * (height-1) + width) > 4096)
 			{
-				tc[((tline + i) ^ xorval8) & 0xfff] = U_RREADADDR8(src + s + i);
+        LOGERROR("rdp_load_tile 8-bit: tmem %04X, width %d, height %d = %d\n", rdpTiles[tilenum].tmem, width, height, width*height);
+        height = (4096-tb)/line;
 			}
-		}
-		break;
-	}
-	case RDP_PIXEL_SIZE_16BIT:
-	{
-		const UINT32 src = rdpTiAddress >> 1;
-		UINT16* tc = (uint16_t*)rdpTmem;
 
-		if (rdpTiles[tilenum].format != RDP_FORMAT_YUV)
-		{
-			for (INT32 j = 0; j < height; j++)
+			for (j=0; j < height; j++)
 			{
-				const INT32 tb = rdpTiles[tilenum].tmem << 2;
-				const INT32 tline = tb + ((rdpTiles[tilenum].line << 2) * j);
-				const INT32 s = ((j + tl) * rdpTiWidth) + sl;
-				const INT32 xorval16 = (j & 1) ? WORD_XOR_DWORD_SWAP : WORD_ADDR_XOR;
+				int tline = tb + (rdpTiles[tilenum].line * j);
+				int s = ((j + tl) * rdpTiWidth) + sl;
 
-				for (INT32 i = 0; i < width; i++)
+				for (i=0; i < width; i++)
 				{
-					UINT32 taddr = (tline + i) ^ xorval16;
-					tc[taddr & 0x7ff] = U_RREADIDX16(src + s + i);
+					tc[(((tline+i) ^ BYTE_ADDR_XOR) ^ ((j & 1) ? 4 : 0))&0xfff] = src[(rdpTiAddress + s++) ^ BYTE_ADDR_XOR];
 				}
 			}
+			break;
 		}
-		else
+		case RDP_PIXEL_SIZE_16BIT:
 		{
-			for (INT32 j = 0; j < height; j++)
-			{
-				const INT32 tb = rdpTiles[tilenum].tmem << 3;
-				const INT32 tline = tb + ((rdpTiles[tilenum].line << 3) * j);
-				const INT32 s = ((j + tl) * rdpTiWidth) + sl;
-				const INT32 xorval8 = (j & 1) ? BYTE_XOR_DWORD_SWAP : BYTE_ADDR_XOR;
-				UINT8* tc8 = (uint8_t*)rdpTmem;
+			uint16_t *src = (uint16_t*)&rdram[0];
+			uint16_t *tc = (uint16_t*)rdpTmem;
+			int tb = (rdpTiles[tilenum].tmem / 2);
 
-				for (INT32 i = 0; i < width; i++)
+			if (tb + (line/2 * (height-1) + width) > 2048)
+			{
+				LOGERROR("rdp_load_tile 16-bit: tmem %04X, width %d, height %d = %d\n", rdpTiles[tilenum].tmem, width, height, width*height);
+        height = (2048 - tb) / (line/2);
+			}
+
+      MarkTmemArea(tb*2, tb*2 + height*line,
+                   rdpTiAddress + (tl * rdpTiWidth + sl)*2,
+                   rdpTiWidth*2, rdpTiFormat, rdpTiSize);
+
+			for (j=0; j < height; j++)
+			{
+				int tline = tb + ((rdpTiles[tilenum].line / 2) * j);
+				int s = ((j + tl) * rdpTiWidth) + sl;
+
+				for (i=0; i < width; i++)
 				{
-					UINT32 taddr = ((tline + i) ^ xorval8) & 0x7ff;
-					UINT16 yuvword = U_RREADIDX16(src + s + i);
-					tc8[taddr] = yuvword >> 8;
-					tc8[taddr | 0x800] = yuvword & 0xff;
+					tc[(((tline+i) ^ WORD_ADDR_XOR) ^ ((j & 1) ? 2 : 0))&0x7ff] = src[(rdpTiAddress / 2 + s++) ^ WORD_ADDR_XOR];
 				}
 			}
+			break;
 		}
-		break;
-	}
-	case RDP_PIXEL_SIZE_32BIT:
-	{
-		const UINT32 src = rdpTiAddress >> 2;
-		const INT32 tb = (rdpTiles[tilenum].tmem << 2);
-		UINT16* tc16 = (uint16_t*)rdpTmem;
-
-		for (INT32 j = 0; j < height; j++)
+		case RDP_PIXEL_SIZE_32BIT:
 		{
-			const INT32 tline = tb + ((rdpTiles[tilenum].line << 2) * j);
+			uint32_t *src = (uint32_t*)&rdram[0];
+			uint32_t *tc = (uint32_t*)rdpTmem;
+			int tb = (rdpTiles[tilenum].tmem / 4);
 
-			const INT32 s = ((j + tl) * rdpTiWidth) + sl;
-			const INT32 xorval32cur = (j & 1) ? WORD_XOR_DWORD_SWAP : WORD_ADDR_XOR;
-			for (INT32 i = 0; i < width; i++)
+      MarkTmemArea(tb*4, tb*4 + height*line*2,
+                   rdpTiAddress + (tl * rdpTiWidth + sl)*4,
+                   rdpTiWidth*4, rdpTiFormat, rdpTiSize);
+
+			if (tb + (line/2 * (height-1) + width) > 1024)
 			{
-				UINT32 c = U_RREADIDX32(src + s + i);
-				UINT32 ptr = ((tline + i) ^ xorval32cur) & 0x3ff;
-				tc16[ptr] = c >> 16;
-				tc16[ptr | 0x400] = c & 0xffff;
+				FATAL("rdp_load_tile 32-bit: tmem %04X, width %d, height %d = %d\n", rdpTiles[tilenum].tmem, width, height, width*height);
 			}
+
+			for (j=0; j < height; j++)
+			{
+				int tline = tb + ((rdpTiles[tilenum].line / 2) * j);
+				int s = ((j + tl) * rdpTiWidth) + sl;
+
+				for (i=0; i < width; i++)
+				{
+					tc[((tline+i) ^ ((j & 1) ? 2 : 0))&0x3ff] = src[(rdpTiAddress / 4 + s++)];
+				}
+			}
+			break;
 		}
-		break;
-	}
 
-	default:   	FATAL("RDP: load_tile: size = %d\n", rdpTiSize);
+		default:	FATAL("RDP: load_tile: size = %d\n", rdpTiSize);
 	}
-
-	//m_tiles[tilenum].sth = rgbaint_t(m_tiles[tilenum].sh, m_tiles[tilenum].sh, m_tiles[tilenum].th, m_tiles[tilenum].th);
-	//m_tiles[tilenum].stl = rgbaint_t(m_tiles[tilenum].sl, m_tiles[tilenum].sl, m_tiles[tilenum].tl, m_tiles[tilenum].tl);
 }
 
 static void rdp_set_tile(uint32_t w1, uint32_t w2)
