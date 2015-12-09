@@ -38,7 +38,18 @@
 # define BYTE4_XOR_BE(a) 	(a)
 #endif
 
+#ifdef LSB_FIRST
+#define BYTE_XOR_DWORD_SWAP 7
+#define WORD_XOR_DWORD_SWAP 3
+#else
+#define BYTE_XOR_DWORD_SWAP 4
+#define WORD_XOR_DWORD_SWAP 2
+#endif
+#define DWORD_XOR_DWORD_SWAP 1
 
+#define U_RREADADDR8(in) (((UINT8*)rdram)[(in) ^ BYTE_ADDR_XOR])
+#define U_RREADIDX16(in) (((UINT16*)rdram)[(in) ^ WORD_ADDR_XOR])
+#define U_RREADIDX32(in) (rdram[(in)])
 
 #define RDP_PIXEL_SIZE_4BIT			0
 #define RDP_PIXEL_SIZE_8BIT			1

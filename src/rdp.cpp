@@ -430,7 +430,7 @@ static void rdp_load_block(uint32_t w1, uint32_t w2)
 	int i, width;
 	uint16_t sl, sh, tl, dxt;
 	int tilenum = (w2 >> 24) & 0x7;
-	uint32_t *src, *tc;
+	uint16_t *tc;
 	int tb;
 
   rdpChanged |= RDP_BITS_TMEM;
@@ -440,50 +440,150 @@ static void rdp_load_block(uint32_t w1, uint32_t w2)
 	sh	= ((w2 >> 12) & 0xfff);
 	dxt	= ((w2 >>  0) & 0xfff);
 
-	width = (sh - sl + 1) << rdpTiSize >> 1;
+	width = (sh - sl) + 1;
 
-	src = (uint32_t*)&rdram[0];
-	tc = (uint32_t*)rdpTmem;
-	tb = rdpTiles[tilenum].tmem/4;
+	width = (width << rdpTiSize) >> 1;
+	if (width & 7)
+		width = (width & ~7) + 8;
+	width >>= 3;
 
-  //printf("Load block to %x width %x\n", rdpTiles[tilenum].tmem, width);
+	tc = (uint16_t*)rdpTmem;
+	tb = rdpTiles[tilenum].tmem << 2;
 
-  MarkTmemArea(rdpTiles[tilenum].tmem, rdpTiles[tilenum].tmem + width,
-               tl * rdpTiWidth*4 + rdpTiAddress + sl*4, 0, ~0, ~0);
+	const INT32 tiwinwords = (rdpTiWidth << rdpTiSize) >> 2;
+	const INT32 slinwords = (sl << rdpTiSize) >> 2;
 
-  if (tb+width/4 > 0x1000/4) {
-    LOG("load_block : fixup too large width\n", width, 0x1000-tb*4);
-    width = 0x1000-tb*4;
-  }
+	const UINT32 src = (rdpTiAddress >> 1) + (tl * tiwinwords) + slinwords;
 
-  if (dxt != 0)
+	if (dxt != 0)
 	{
-		int j=0;
+		INT32 j = 0;
+		INT32 t = 0;
+		INT32 oldt = 0;
 
-    //rglAssert(tb+width/4 <= 0x1000/4);
-
-    int swap = rdpTiles[tilenum].size == 3? 2 : 1;
-
-		for (i=0; i < width / 4; i+=2)
+		if (rdpTiles[tilenum].size != RDP_PIXEL_SIZE_32BIT && rdpTiles[tilenum].format != RDP_FORMAT_YUV)
 		{
-			int t = j >> 11;
+			for (INT32 i = 0; i < width; i++)
+			{
+				oldt = t;
+				t = ((j >> 11) & 1) ? WORD_XOR_DWORD_SWAP : WORD_ADDR_XOR;
+				if (t != oldt)
+				{
+					i += rdpTiles[tilenum].line;
+				}
 
-      tc[(((tb+i) + 0)  ^ ((t & 1) ? swap : 0))&0x3ff] =
-        src[rdpTiAddress / 4 + ((tl * rdpTiWidth) / 4) + sl + i + 0];
-      tc[(((tb+i) + 1) ^ ((t & 1) ? swap : 0))&0x3ff] =
-        src[rdpTiAddress / 4 + ((tl * rdpTiWidth) / 4) + sl + i + 1];
-        
-			j += dxt;
+				INT32 ptr = tb + (i << 2);
+				INT32 srcptr = src + (i << 2);
+
+				tc[(ptr ^ t) & 0x7ff] = U_RREADIDX16(srcptr);
+				tc[((ptr + 1) ^ t) & 0x7ff] = U_RREADIDX16(srcptr + 1);
+				tc[((ptr + 2) ^ t) & 0x7ff] = U_RREADIDX16(srcptr + 2);
+				tc[((ptr + 3) ^ t) & 0x7ff] = U_RREADIDX16(srcptr + 3);
+				j += dxt;
+			}
 		}
+		else if (rdpTiles[tilenum].format == RDP_FORMAT_YUV)
+		{
+			for (INT32 i = 0; i < width; i++)
+			{
+				oldt = t;
+				t = ((j >> 11) & 1) ? WORD_XOR_DWORD_SWAP : WORD_ADDR_XOR;
+				if (t != oldt)
+				{
+					i += rdpTiles[tilenum].line;
+				}
+
+				INT32 ptr = ((tb + (i << 1)) ^ t) & 0x3ff;
+				INT32 srcptr = src + (i << 2);
+
+				INT32 first = U_RREADIDX16(srcptr);
+				INT32 sec = U_RREADIDX16(srcptr + 1);
+				tc[ptr] = ((first >> 8) << 8) | (sec >> 8);
+				tc[ptr | 0x400] = ((first & 0xff) << 8) | (sec & 0xff);
+
+				ptr = ((tb + (i << 1) + 1) ^ t) & 0x3ff;
+				first = U_RREADIDX16(srcptr + 2);
+				sec = U_RREADIDX16(srcptr + 3);
+				tc[ptr] = ((first >> 8) << 8) | (sec >> 8);
+				tc[ptr | 0x400] = ((first & 0xff) << 8) | (sec & 0xff);
+
+				j += dxt;
+			}
+		}
+		else
+		{
+			for (INT32 i = 0; i < width; i++)
+			{
+				oldt = t;
+				t = ((j >> 11) & 1) ? WORD_XOR_DWORD_SWAP : WORD_ADDR_XOR;
+				if (t != oldt)
+					i += rdpTiles[tilenum].line;
+
+				INT32 ptr = ((tb + (i << 1)) ^ t) & 0x3ff;
+				INT32 srcptr = src + (i << 2);
+				tc[ptr] = U_RREADIDX16(srcptr);
+				tc[ptr | 0x400] = U_RREADIDX16(srcptr + 1);
+
+				ptr = ((tb + (i << 1) + 1) ^ t) & 0x3ff;
+				tc[ptr] = U_RREADIDX16(srcptr + 2);
+				tc[ptr | 0x400] = U_RREADIDX16(srcptr + 3);
+
+				j += dxt;
+			}
+		}
+		rdpTiles[tilenum].th = tl + (j >> 11);
 	}
 	else
 	{
-    //rglAssert(tb+width/4 <= 0x1000/4);
-		for (i=0; i < width / 4; i++)
+		if (rdpTiles[tilenum].size != RDP_PIXEL_SIZE_32BIT && rdpTiles[tilenum].format != RDP_FORMAT_YUV)
 		{
-			tc[(tb+i)&0x3ff] = src[((tl * rdpTiWidth) / 4) + rdpTiAddress / 4 + sl + i];
+			for (INT32 i = 0; i < width; i++)
+			{
+				INT32 ptr = tb + (i << 2);
+				INT32 srcptr = src + (i << 2);
+				tc[(ptr ^ WORD_ADDR_XOR) & 0x7ff] = U_RREADIDX16(srcptr);
+				tc[((ptr + 1) ^ WORD_ADDR_XOR) & 0x7ff] = U_RREADIDX16(srcptr + 1);
+				tc[((ptr + 2) ^ WORD_ADDR_XOR) & 0x7ff] = U_RREADIDX16(srcptr + 2);
+				tc[((ptr + 3) ^ WORD_ADDR_XOR) & 0x7ff] = U_RREADIDX16(srcptr + 3);
+			}
 		}
+		else if (rdpTiles[tilenum].format == RDP_FORMAT_YUV)
+		{
+			for (INT32 i = 0; i < width; i++)
+			{
+				INT32 ptr = ((tb + (i << 1)) ^ WORD_ADDR_XOR) & 0x3ff;
+				INT32 srcptr = src + (i << 2);
+				INT32 first = U_RREADIDX16(srcptr);
+				INT32 sec = U_RREADIDX16(srcptr + 1);
+				tc[ptr] = ((first >> 8) << 8) | (sec >> 8);//UV pair
+				tc[ptr | 0x400] = ((first & 0xff) << 8) | (sec & 0xff);
+
+				ptr = ((tb + (i << 1) + 1) ^ WORD_ADDR_XOR) & 0x3ff;
+				first = U_RREADIDX16(srcptr + 2);
+				sec = U_RREADIDX16(srcptr + 3);
+				tc[ptr] = ((first >> 8) << 8) | (sec >> 8);
+				tc[ptr | 0x400] = ((first & 0xff) << 8) | (sec & 0xff);
+			}
+		}
+		else
+		{
+			for (INT32 i = 0; i < width; i++)
+			{
+				INT32 ptr = ((tb + (i << 1)) ^ WORD_ADDR_XOR) & 0x3ff;
+				INT32 srcptr = src + (i << 2);
+				tc[ptr] = U_RREADIDX16(srcptr);
+				tc[ptr | 0x400] = U_RREADIDX16(srcptr + 1);
+
+				ptr = ((tb + (i << 1) + 1) ^ WORD_ADDR_XOR) & 0x3ff;
+				tc[ptr] = U_RREADIDX16(srcptr + 2);
+				tc[ptr | 0x400] = U_RREADIDX16(srcptr + 3);
+			}
+		}
+		rdpTiles[tilenum].th = tl;
 	}
+
+	//rdpTiles[tilenum].sth = rgbaint_t(m_tiles[tilenum].sh, m_tiles[tilenum].sh, m_tiles[tilenum].th, m_tiles[tilenum].th);
+	//rdpTiles[tilenum].stl = rgbaint_t(m_tiles[tilenum].sl, m_tiles[tilenum].sl, m_tiles[tilenum].tl, m_tiles[tilenum].tl);
 }
 
 static void rdp_load_tile(uint32_t w1, uint32_t w2)
